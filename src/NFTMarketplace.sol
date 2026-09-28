@@ -2,14 +2,20 @@
 pragma solidity ^0.8.20;
 
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-contract NFTMarketplace {
+contract NFTMarketplace is ReentrancyGuard, Pausable, Ownable {
+    constructor() Ownable(msg.sender) {}
+
     struct Listing {
         address seller;
         uint256 price;
     }
 
     mapping(address => mapping(uint256 => Listing)) public listings;
+    mapping(address => uint256) public pendingWithdrawals;
 
     event NFTListed(address indexed nftAddress, uint256 indexed tokenId, address indexed seller, uint256 price);
 
@@ -17,7 +23,15 @@ contract NFTMarketplace {
 
     event ListingCancelled(address indexed nftAddress, uint256 indexed tokenId, address indexed seller);
 
-    function listNFT(address nftAddress, uint256 tokenId, uint256 price) external {
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    function listNFT(address nftAddress, uint256 tokenId, uint256 price) external whenNotPaused {
         IERC721 nft = IERC721(nftAddress);
 
         require(nft.ownerOf(tokenId) == msg.sender, "Not NFT owner");
@@ -34,10 +48,11 @@ contract NFTMarketplace {
         emit NFTListed(nftAddress, tokenId, msg.sender, price);
     }
 
-    function buyNFT(address nftAddress, uint256 tokenId) external payable {
+    function buyNFT(address nftAddress, uint256 tokenId) external payable nonReentrant whenNotPaused {
         Listing memory listing = listings[nftAddress][tokenId];
 
         require(listing.seller != address(0), "NFT not listed");
+
         require(msg.value == listing.price, "Incorrect price");
 
         IERC721 nft = IERC721(nftAddress);
@@ -53,9 +68,19 @@ contract NFTMarketplace {
 
         nft.safeTransferFrom(listing.seller, msg.sender, tokenId);
 
-        emit NFTPurchased(nftAddress, tokenId, msg.sender, listing.price);
+        pendingWithdrawals[listing.seller] += msg.value;
 
-        (bool success,) = payable(listing.seller).call{value: msg.value}("");
+        emit NFTPurchased(nftAddress, tokenId, msg.sender, listing.price);
+    }
+
+    function withdrawPayments() external nonReentrant {
+        uint256 amount = pendingWithdrawals[msg.sender];
+
+        require(amount > 0, "No pending payments");
+
+        pendingWithdrawals[msg.sender] = 0;
+
+        (bool success,) = payable(msg.sender).call{value: amount}("");
 
         require(success, "Payment failed");
     }
@@ -76,6 +101,7 @@ contract NFTMarketplace {
         require(listing.seller == msg.sender, "Not seller");
 
         require(newPrice > 0, "Invalid price");
+
         listing.price = newPrice;
     }
 }

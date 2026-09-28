@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {MyNFT} from "../src/MyNFT.sol";
 import {NFTMarketplace} from "../src/NFTMarketplace.sol";
+import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 
 contract NFTMarketplaceTest is Test {
     MyNFT nft;
@@ -25,7 +26,6 @@ contract NFTMarketplaceTest is Test {
         vm.startPrank(alice);
 
         nft.approve(address(marketplace), 0);
-
         marketplace.listNFT(address(nft), 0, 1.1 ether);
 
         vm.stopPrank();
@@ -33,11 +33,26 @@ contract NFTMarketplaceTest is Test {
         uint256 aliceBalanceBefore = alice.balance;
 
         vm.prank(bob);
-
         marketplace.buyNFT{value: 1.1 ether}(address(nft), 0);
 
+        // Bob recibe el NFT
         assertEq(nft.ownerOf(0), bob);
+
+        // Alice todavía no ha cobrado
+        assertEq(alice.balance, aliceBalanceBefore);
+
+        // El marketplace le debe 1.1 ETH
+        assertEq(marketplace.pendingWithdrawals(alice), 1.1 ether);
+
+        // Alice reclama el dinero
+        vm.prank(alice);
+        marketplace.withdrawPayments();
+
+        // Ahora sí cobra
         assertEq(alice.balance, aliceBalanceBefore + 1.1 ether);
+
+        // Ya no queda nada pendiente
+        assertEq(marketplace.pendingWithdrawals(alice), 0);
     }
 
     function testCannotBuyWithWrongPrice() public {
@@ -141,5 +156,61 @@ contract NFTMarketplaceTest is Test {
         vm.expectRevert("Seller no longer owns NFT");
 
         marketplace.buyNFT{value: 2 ether}(address(nft), 0);
+    }
+
+    function testReentrancyAttackOnWithdrawFails() public {
+        ReentrantSeller attacker = new ReentrantSeller(marketplace, nft);
+
+        nft.mint(address(attacker), "ipfs://example/attacker.json");
+
+        // El #0 ya pertenece a Alice, así que attacker recibe el #1
+        attacker.list(1, 2 ether);
+
+        vm.prank(bob);
+        marketplace.buyNFT{value: 2 ether}(address(nft), 1);
+
+        assertEq(marketplace.pendingWithdrawals(address(attacker)), 2 ether);
+
+        attacker.withdraw();
+
+        assertEq(address(attacker).balance, 2 ether);
+
+        assertEq(marketplace.pendingWithdrawals(address(attacker)), 0);
+
+        assertTrue(attacker.attemptedReentrancy());
+    }
+}
+
+contract ReentrantSeller is ERC721Holder {
+    NFTMarketplace public marketplace;
+    MyNFT public nft;
+
+    bool public attemptedReentrancy;
+
+    constructor(NFTMarketplace _marketplace, MyNFT _nft) {
+        marketplace = _marketplace;
+        nft = _nft;
+    }
+
+    function list(uint256 tokenId, uint256 price) external {
+        nft.approve(address(marketplace), tokenId);
+        marketplace.listNFT(address(nft), tokenId, price);
+    }
+
+    function withdraw() external {
+        marketplace.withdrawPayments();
+    }
+
+    receive() external payable {
+        if (!attemptedReentrancy) {
+            attemptedReentrancy = true;
+
+            try marketplace.withdrawPayments() {
+            // Si funcionase, habría reentrado.
+            }
+                catch {
+                // nonReentrant bloquea el segundo withdraw.
+            }
+        }
     }
 }
