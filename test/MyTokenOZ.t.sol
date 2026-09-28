@@ -83,4 +83,30 @@ contract MyTokenOZTest is Test {
 
         assertEq(token.balanceOf(alice), 100 ether);
     }
+
+    function testFuzzMint(uint256 amount) public {
+        amount = bound(amount, 1, 1_000_000 ether);
+
+        token.mint(address(0xB0B), amount);
+
+        assertEq(token.balanceOf(address(0xB0B)), amount);
+
+        assertEq(token.totalSupply(), amount);
+    }
+
+    function testFuzzTransferBetweenDifferentUsers(address from, address to, uint256 amount) public {
+        vm.assume(from != address(0));
+        vm.assume(to != address(0));
+        vm.assume(from != to);
+
+        amount = bound(amount, 1, 1_000_000 ether);
+
+        token.mint(from, amount);
+
+        vm.prank(from);
+        token.transfer(to, amount);
+
+        assertEq(token.balanceOf(from), 0);
+        assertEq(token.balanceOf(to), amount);
+    }
 }
